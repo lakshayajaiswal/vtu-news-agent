@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const cron = require('node-cron');
-const nodemailer = require('nodemailer');
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 const sqlite3 = require('sqlite3').verbose();
@@ -81,23 +80,29 @@ db.serialize(() => {
   }
 });
 
-// Email Configuration
-const emailTransporter = nodemailer.createTransport({
-  service: process.env.EMAIL_SERVICE || 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD
-  }
-});
+// Email Configuration - using Resend (HTTP API) instead of SMTP
+// Render's free tier blocks outbound SMTP ports, so Gmail SMTP cannot work there.
+// Resend sends over HTTPS, which is never blocked.
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || 'VTU News Agent <onboarding@resend.dev>';
 
-// Test email connection
-emailTransporter.verify((error, success) => {
-  if (error) {
-    console.log('❌ Email configuration error:', error.message);
-  } else {
-    console.log('✅ Email service ready');
+async function sendEmail(to, subject, html) {
+  if (!RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY is not set in environment variables');
   }
-});
+  const response = await axios.post(
+    'https://api.resend.com/emails',
+    { from: RESEND_FROM, to: [to], subject, html },
+    { headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+  );
+  return response.data;
+}
+
+if (RESEND_API_KEY) {
+  console.log('✅ Email service ready (Resend)');
+} else {
+  console.log('❌ RESEND_API_KEY not set - emails will fail');
+}
 
 // News Sources
 const newsSources = {
@@ -308,12 +313,7 @@ async function sendDigestToSubscriber(email, sendTime) {
 </html>
     `;
 
-    await emailTransporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Your Daily News Brief',
-      html: htmlContent
-    });
+    await sendEmail(email, 'Your Daily News Brief', htmlContent);
 
     db.run('INSERT INTO email_logs (email, status) VALUES (?, ?)', [email, 'sent']);
     console.log(`✅ Email sent to ${email}`);
@@ -550,27 +550,21 @@ app.post('/api/send-digest', (req, res) => {
 });
 
 // API: Test email
-app.post('/api/test-email', (req, res) => {
+app.post('/api/test-email', async (req, res) => {
   const { email } = req.body;
-  
+
   if (!email) {
     return res.json({ success: false, error: 'Email required' });
   }
-  
-  emailTransporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'Test Email - VTU News Agent',
-    html: '<h1>Test Successful!</h1><p>Your VTU News Agent is working correctly.</p>'
-  }, (err, info) => {
-    if (err) {
-      console.error('Test email error:', err);
-      res.json({ success: false, error: err.message });
-    } else {
-      console.log(`✅ Test email sent to ${email}`);
-      res.json({ success: true, message: `Test email sent to ${email}` });
-    }
-  });
+
+  try {
+    await sendEmail(email, 'Test Email - VTU News Agent', '<h1>Test Successful!</h1><p>Your VTU News Agent is working correctly.</p>');
+    console.log(`✅ Test email sent to ${email}`);
+    res.json({ success: true, message: `Test email sent to ${email}` });
+  } catch (err) {
+    console.error('Test email error:', err.response?.data || err.message);
+    res.json({ success: false, error: err.response?.data?.message || err.message });
+  }
 });
 
 // Serve HTML

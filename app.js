@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cron = require('node-cron');
 const axios = require('axios');
-const Anthropic = require('@anthropic-ai/sdk');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
@@ -12,7 +11,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-const client = new Anthropic();
 
 // Database Setup
 const db = new sqlite3.Database('news_agent.db', (err) => {
@@ -230,34 +228,32 @@ function generateSampleNews() {
 }
 
 
-// Summarize with Claude
-async function summarizeNews(newsItems) {
+// Format news into a readable digest - no paid API needed, pure local formatting
+function summarizeNews(newsItems) {
   if (newsItems.length === 0) return 'No news available today.';
 
-  try {
-    const newsContent = newsItems
-      .map((item, i) => `${i + 1}. [${item.category}] ${item.title}\nContent: ${item.content}`)
-      .join('\n\n');
-
-    const message = await client.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: `Create a professional yet casual daily news digest from these items. Organize by category. Mark urgent items with ⚠️. Keep it under 500 words and actionable.
-
-${newsContent}`
-      }]
-    });
-
-    return message.content[0].type === 'text' 
-      ? message.content[0].text 
-      : 'Unable to summarize news.';
-  } catch (err) {
-    console.error('Claude API Error:', err.status, err.message, err.error || '');
-    return 'News digest temporarily unavailable.';
+  // Group items by category
+  const byCategory = {};
+  for (const item of newsItems) {
+    const cat = item.category || 'General';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(item);
   }
+
+  let output = '';
+  for (const [category, items] of Object.entries(byCategory)) {
+    output += `# ${category}\n`;
+    for (const item of items.slice(0, 5)) { // cap at 5 per category to keep it readable
+      const isUrgent = /critical|urgent|vulnerability|breach|alert/i.test(item.title + ' ' + item.content);
+      const prefix = isUrgent ? '⚠️ ' : '';
+      output += `${prefix}${item.title} — ${item.content}\n`;
+    }
+    output += '\n';
+  }
+
+  return output.trim();
 }
+
 
 // Format summary text lines into HTML (kept separate to avoid nested template literal issues)
 function formatSummaryLines(summary) {

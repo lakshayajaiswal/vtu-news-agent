@@ -475,6 +475,37 @@ app.delete('/api/subscribers/:email', (req, res) => {
 });
 
 // API: Get news
+// API: Get my own profile (subscriber self-service)
+app.get('/api/my-profile', (req, res) => {
+  const token = req.headers.authorization;
+  if (!token) return res.json({ error: 'Not authorized' });
+  const email = Buffer.from(token, 'base64').toString('utf8');
+
+  db.get('SELECT email, send_time, is_owner, created_at FROM subscribers WHERE email = ?', [email], (err, row) => {
+    if (row) res.json(row);
+    else res.json({ error: 'Not found' });
+  });
+});
+
+// API: Update my own send time (subscriber self-service)
+app.put('/api/my-time', (req, res) => {
+  const token = req.headers.authorization;
+  if (!token) return res.json({ success: false, error: 'Not authorized' });
+  const email = Buffer.from(token, 'base64').toString('utf8');
+  const { sendTime } = req.body;
+
+  const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
+  if (!timeRegex.test(sendTime)) {
+    return res.json({ success: false, error: 'Invalid time format' });
+  }
+
+  db.run('UPDATE subscribers SET send_time = ? WHERE email = ?', [sendTime, email], (err) => {
+    if (err) return res.json({ success: false, error: 'Update failed' });
+    scheduleAllDigests();
+    res.json({ success: true, message: 'Time updated' });
+  });
+});
+
 app.get('/api/news', (req, res) => {
   db.all('SELECT * FROM news ORDER BY created_at DESC LIMIT 100', (err, rows) => {
     res.json(rows || []);
@@ -549,103 +580,210 @@ app.get('/', (req, res) => {
 <html>
 <head>
   <title>VTU News Agent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --owner-primary: #4f46e5;
+      --owner-primary-dark: #4338ca;
+      --owner-bg: #eef2ff;
+      --sub-primary: #0d9488;
+      --sub-primary-dark: #0f766e;
+      --sub-bg: #f0fdfa;
+      --danger: #dc2626;
+      --text-dark: #1e293b;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --surface: #ffffff;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; background: #f5f5f5; }
-    .navbar { background: #0066cc; color: white; padding: 20px; text-align: center; }
-    .navbar h1 { font-size: 28px; margin: 0; }
-    .container { max-width: 900px; margin: 0 auto; padding: 20px; }
-    .login-box { background: white; padding: 40px; border-radius: 12px; max-width: 450px; margin: 50px auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    .login-box h2 { text-align: center; margin-bottom: 30px; color: #333; }
-    .input { width: 100%; padding: 12px; margin: 15px 0; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
-    .button { width: 100%; padding: 12px; background: #0066cc; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; margin-top: 10px; }
-    .button:hover { background: #0052a3; }
-    .message { text-align: center; margin: 15px 0; font-size: 14px; }
-    .success { color: green; }
-    .error { color: red; }
-    .hidden { display: none; }
-    .dashboard { padding: 20px; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 30px; }
-    .stat-card { background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .stat-value { font-size: 28px; font-weight: bold; color: #0066cc; }
-    .stat-label { font-size: 12px; color: #666; margin-top: 8px; }
-    table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #e0e0e0; }
-    th { background: #0066cc; color: white; font-weight: bold; }
-    tr:hover { background: #f5f5f5; }
-    .logout-btn { background: #dc3545; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+    body { font-family: 'Inter', Arial, sans-serif; background: #f8fafc; color: var(--text-dark); }
+    .hidden { display: none !important; }
+
+    /* ===== LOGIN / SIGNUP ===== */
+    .auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #4f46e5 0%, #0d9488 100%); padding: 20px; }
+    .auth-card { background: var(--surface); border-radius: 16px; padding: 40px; max-width: 420px; width: 100%; box-shadow: 0 20px 50px rgba(0,0,0,0.2); }
+    .auth-logo { text-align: center; font-size: 40px; margin-bottom: 8px; }
+    .auth-title { text-align: center; font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .auth-sub { text-align: center; font-size: 13px; color: var(--text-muted); margin-bottom: 28px; }
+    .input { width: 100%; padding: 13px 14px; margin: 8px 0; border: 1.5px solid var(--border); border-radius: 10px; font-size: 14px; font-family: inherit; transition: border-color .15s; }
+    .input:focus { outline: none; border-color: var(--owner-primary); }
+    label.field-label { font-size: 12px; color: var(--text-muted); font-weight: 600; display: block; margin: 14px 0 2px; }
+    .btn { width: 100%; padding: 13px; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 14px; font-family: inherit; margin-top: 14px; transition: transform .1s, opacity .15s; }
+    .btn:hover { opacity: 0.92; }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--owner-primary); color: white; }
+    .message { text-align: center; margin: 14px 0 0; font-size: 13px; font-weight: 500; min-height: 18px; }
+    .success { color: #059669; }
+    .error { color: var(--danger); }
+    .switch-line { text-align: center; font-size: 13px; margin-top: 20px; color: var(--text-muted); }
+    .switch-line a { color: var(--owner-primary); font-weight: 600; text-decoration: none; }
+
+    /* ===== SHARED PORTAL CHROME ===== */
+    .topbar { padding: 16px 28px; display: flex; align-items: center; justify-content: space-between; color: white; }
+    .topbar-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+    .topbar-badge { background: rgba(255,255,255,0.2); padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .logout-btn { background: rgba(255,255,255,0.15); color: white; border: none; padding: 9px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+    .logout-btn:hover { background: rgba(255,255,255,0.28); }
+    .portal-body { max-width: 1000px; margin: 0 auto; padding: 28px 20px 60px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px; margin-bottom: 20px; }
+    .card h3 { font-size: 15px; font-weight: 700; margin-bottom: 16px; }
+    .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 28px 0 12px; }
+    .section-label:first-child { margin-top: 0; }
+
+    /* ===== OWNER PORTAL ===== */
+    #ownerTopbar { background: linear-gradient(135deg, var(--owner-primary), #6366f1); }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .stat-card { background: var(--owner-bg); border-radius: 12px; padding: 18px; text-align: center; }
+    .stat-value { font-size: 26px; font-weight: 800; color: var(--owner-primary); }
+    .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 12px; text-align: left; font-size: 13px; }
+    th { background: var(--owner-bg); color: var(--owner-primary-dark); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+    tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+    .remove-btn { background: #fee2e2; color: var(--danger); border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px; }
+    .remove-btn:hover { background: #fecaca; }
+    .btn-owner { background: var(--owner-primary); color: white; }
+    .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .setup-alert { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 14px 16px; font-size: 12.5px; color: #92400e; margin-bottom: 20px; line-height: 1.6; }
+
+    /* ===== SUBSCRIBER PORTAL ===== */
+    #subTopbar { background: linear-gradient(135deg, var(--sub-primary), #14b8a6); }
+    .profile-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+    .profile-time { font-size: 22px; font-weight: 800; color: var(--sub-primary-dark); }
+    .btn-sub { background: var(--sub-primary); color: white; width: auto; padding: 10px 20px; margin-top: 0; }
+    .filter-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+    .filter-chip { border: 1.5px solid var(--border); background: white; padding: 7px 14px; border-radius: 20px; cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+    .filter-chip.active { background: var(--sub-primary); border-color: var(--sub-primary); color: white; }
+    .news-item { padding: 16px 0; border-bottom: 1px solid var(--border); }
+    .news-item:last-child { border-bottom: none; }
+    .news-meta { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
+    .news-title { font-size: 14.5px; font-weight: 700; margin-bottom: 6px; }
+    .news-content { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); font-size: 13px; }
   </style>
 </head>
 <body>
-  <div class="navbar">
-    <h1>📰 VTU News Agent</h1>
-    <p>Automated Daily News Digest</p>
-  </div>
-  
-  <div class="container">
-    <div id="loginBox" class="login-box">
-      <h2 id="formTitle">Login</h2>
-      <input type="email" id="email" class="input" placeholder="Email" />
-      <input type="password" id="password" class="input" placeholder="Password" />
+
+  <!-- ============ LOGIN / SIGNUP ============ -->
+  <div id="authWrap" class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-logo">📰</div>
+      <div class="auth-title" id="formTitle">Welcome back</div>
+      <div class="auth-sub" id="formSub">Login to your VTU News Agent account</div>
+
+      <label class="field-label">Email</label>
+      <input type="email" id="email" class="input" placeholder="you@example.com" />
+
+      <label class="field-label">Password</label>
+      <input type="password" id="password" class="input" placeholder="••••••••" />
+
       <div id="signupExtra" class="hidden">
-        <label style="font-size:12px;color:#666;display:block;margin-top:10px;">Preferred daily news time</label>
+        <label class="field-label">Preferred daily news time</label>
         <input type="time" id="signupTime" class="input" value="07:00" />
       </div>
-      <button class="button" id="primaryBtn" onclick="login()">Login</button>
+
+      <button class="btn btn-primary" id="primaryBtn" onclick="login()">Login</button>
       <div class="message" id="message"></div>
-      <p style="text-align:center;font-size:13px;margin-top:15px;">
+
+      <p class="switch-line">
         <span id="toggleText">Don't have an account?</span>
-        <a href="#" onclick="toggleMode(); return false;" id="toggleLink" style="color:#0066cc;font-weight:bold;">Sign up</a>
+        <a href="#" onclick="toggleMode(); return false;" id="toggleLink">Sign up</a>
       </p>
     </div>
+  </div>
 
-    <div id="dashboardBox" class="hidden dashboard">
+  <!-- ============ OWNER PORTAL ============ -->
+  <div id="ownerPortal" class="hidden">
+    <div class="topbar" id="ownerTopbar">
+      <div class="topbar-title">📰 VTU News Agent <span class="topbar-badge">OWNER</span></div>
       <button class="logout-btn" onclick="logout()">Logout</button>
-      <h2 style="margin: 20px 0;">Owner Dashboard</h2>
-      
-      <div class="stats">
-        <div class="stat-card">
-          <div class="stat-label">Active Subscribers</div>
-          <div class="stat-value" id="subscriber-count">0</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Emails Sent Today</div>
-          <div class="stat-value" id="email-count">0</div>
-        </div>
+    </div>
+    <div class="portal-body">
+
+      <div class="setup-alert">
+        ⚡ <strong>Delivery tip:</strong> free hosting can go idle. For reliable on-time emails, add an external
+        pinger (e.g. cron-job.org) hitting <code>/api/hourly-check</code> every hour, and set the <code>TZ</code>
+        environment variable (e.g. <code>Asia/Kolkata</code>) on your host so send times match your local clock.
       </div>
 
-      <h3>Subscribers</h3>
-      <table id="subscriberTable">
-        <tr>
-          <th>Email</th>
-          <th>Send Time</th>
-          <th>Joined</th>
-          <th>Actions</th>
-        </tr>
-      </table>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value" id="subscriber-count">0</div><div class="stat-label">Active Subscribers</div></div>
+        <div class="stat-card"><div class="stat-value" id="email-count">—</div><div class="stat-label">Last Send Batch</div></div>
+      </div>
 
-      <div style="margin-top: 30px; background: white; padding: 20px; border-radius: 8px;">
-        <h3>Add New Subscriber</h3>
+      <div class="section-label">Subscribers</div>
+      <div class="card">
+        <table id="subscriberTable">
+          <tr><th>Email</th><th>Send Time</th><th>Joined</th><th></th></tr>
+        </table>
+      </div>
+
+      <div class="section-label">Add Subscriber Manually</div>
+      <div class="card">
         <input type="email" id="newEmail" class="input" placeholder="Email" />
         <input type="password" id="newPassword" class="input" placeholder="Password" />
         <input type="time" id="newTime" class="input" value="07:00" />
-        <button class="button" onclick="addSubscriber()">Add Subscriber</button>
+        <button class="btn btn-owner" onclick="addSubscriber()">Add Subscriber</button>
       </div>
 
-      <div style="margin-top: 20px; background: white; padding: 20px; border-radius: 8px;">
-        <h3>Quick Actions</h3>
-        <button class="button" onclick="sendTestEmail()">Send Test Email</button>
-        <button class="button" onclick="sendNow()">Send Digest Now</button>
+      <div class="section-label">Quick Actions</div>
+      <div class="card">
+        <div class="btn-grid">
+          <button class="btn btn-owner" onclick="sendTestEmail()">Send Test Email to Me</button>
+          <button class="btn btn-owner" onclick="sendNow()">Send Digest to Everyone Now</button>
+        </div>
       </div>
+
+      <div class="message" id="ownerMessage"></div>
+    </div>
+  </div>
+
+  <!-- ============ SUBSCRIBER PORTAL ============ -->
+  <div id="subPortal" class="hidden">
+    <div class="topbar" id="subTopbar">
+      <div class="topbar-title">📰 VTU News Agent <span class="topbar-badge">SUBSCRIBER</span></div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+    <div class="portal-body">
+
+      <div class="card">
+        <div class="profile-row">
+          <div>
+            <div style="font-size:12px;color:var(--text-muted);font-weight:600;margin-bottom:4px;">YOUR DAILY DIGEST ARRIVES AT</div>
+            <div class="profile-time" id="myTimeDisplay">--:--</div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input type="time" id="myTimeInput" class="input" style="width:auto;margin:0;" />
+            <button class="btn btn-sub" onclick="updateMyTime()">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-label">Latest News</div>
+      <div class="filter-row" id="filterRow">
+        <div class="filter-chip active" data-cat="all" onclick="filterNews('all')">All</div>
+        <div class="filter-chip" data-cat="VTU" onclick="filterNews('VTU')">🎓 VTU</div>
+        <div class="filter-chip" data-cat="AI" onclick="filterNews('AI')">🤖 AI</div>
+        <div class="filter-chip" data-cat="Development" onclick="filterNews('Development')">💻 Dev</div>
+        <div class="filter-chip" data-cat="Security" onclick="filterNews('Security')">🔒 Security</div>
+      </div>
+      <div class="card" id="newsFeed">
+        <div class="empty-state">Loading news…</div>
+      </div>
+
+      <div class="message" id="subMessage"></div>
     </div>
   </div>
 
   <script>
     let isSignupMode = false;
+    let allNewsItems = [];
 
     function toggleMode() {
       isSignupMode = !isSignupMode;
-      document.getElementById('formTitle').innerText = isSignupMode ? 'Sign Up' : 'Login';
+      document.getElementById('formTitle').innerText = isSignupMode ? 'Create your account' : 'Welcome back';
+      document.getElementById('formSub').innerText = isSignupMode ? 'Join and get daily news in your inbox' : 'Login to your VTU News Agent account';
       document.getElementById('primaryBtn').innerText = isSignupMode ? 'Create Account' : 'Login';
       document.getElementById('primaryBtn').onclick = isSignupMode ? signup : login;
       document.getElementById('signupExtra').classList.toggle('hidden', !isSignupMode);
@@ -658,25 +796,18 @@ app.get('/', (req, res) => {
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;
       const sendTime = document.getElementById('signupTime').value;
-
-      if (!email || !password) {
-        showMessage('Please enter email and password', 'error');
-        return;
-      }
+      if (!email || !password) return showMessage('Please enter email and password', 'error');
 
       fetch('/api/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, sendTime })
       })
       .then(r => r.json())
       .then(data => {
         if (data.success) {
           showMessage('Account created! Logging you in...', 'success');
-          setTimeout(() => { toggleMode(); login(); }, 1000);
-        } else {
-          showMessage(data.error, 'error');
-        }
+          setTimeout(() => { isSignupMode = false; login(); }, 900);
+        } else showMessage(data.error, 'error');
       })
       .catch(err => showMessage('Error: ' + err.message, 'error'));
     }
@@ -684,52 +815,53 @@ app.get('/', (req, res) => {
     function login() {
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;
-
-      if (!email || !password) {
-        showMessage('Please enter email and password', 'error');
-        return;
-      }
+      if (!email || !password) return showMessage('Please enter email and password', 'error');
 
       fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       })
       .then(r => r.json())
       .then(data => {
         if (data.success) {
           localStorage.setItem('token', data.token);
-          localStorage.setItem('isOwner', data.isOwner);
+          localStorage.setItem('isOwner', data.isOwner ? '1' : '0');
           localStorage.setItem('email', email);
-          document.getElementById('loginBox').classList.add('hidden');
-          document.getElementById('dashboardBox').classList.remove('hidden');
-          loadDashboard();
-        } else {
-          showMessage('Invalid credentials', 'error');
-        }
+          enterPortal();
+        } else showMessage('Invalid credentials', 'error');
       })
       .catch(err => showMessage('Error: ' + err.message, 'error'));
     }
 
-    function logout() {
-      localStorage.clear();
-      location.reload();
+    function logout() { localStorage.clear(); location.reload(); }
+
+    function enterPortal() {
+      document.getElementById('authWrap').classList.add('hidden');
+      const isOwner = localStorage.getItem('isOwner') === '1';
+      if (isOwner) {
+        document.getElementById('ownerPortal').classList.remove('hidden');
+        loadOwnerDashboard();
+      } else {
+        document.getElementById('subPortal').classList.remove('hidden');
+        loadSubscriberPortal();
+      }
     }
 
-    function loadDashboard() {
+    /* ===== OWNER FUNCTIONS ===== */
+    function loadOwnerDashboard() {
       const token = localStorage.getItem('token');
       fetch('/api/subscribers', { headers: { 'Authorization': token } })
       .then(r => r.json())
       .then(data => {
-        document.getElementById('subscriber-count').innerText = data.length;
+        document.getElementById('subscriber-count').innerText = data.length || 0;
         const table = document.getElementById('subscriberTable');
-        table.innerHTML = '<tr><th>Email</th><th>Send Time</th><th>Joined</th><th>Actions</th></tr>';
+        table.innerHTML = '<tr><th>Email</th><th>Send Time</th><th>Joined</th><th></th></tr>';
         data.forEach(sub => {
           table.innerHTML += \`<tr>
             <td>\${sub.email}</td>
             <td>\${sub.send_time}</td>
             <td>\${new Date(sub.created_at).toLocaleDateString()}</td>
-            <td><button style="background:#dc3545;color:white;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;" onclick="deleteSubscriber('\${sub.email}')">Remove</button></td>
+            <td><button class="remove-btn" onclick="deleteSubscriber('\${sub.email}')">Remove</button></td>
           </tr>\`;
         });
       });
@@ -739,72 +871,127 @@ app.get('/', (req, res) => {
       const email = document.getElementById('newEmail').value;
       const password = document.getElementById('newPassword').value;
       const time = document.getElementById('newTime').value;
-
-      if (!email || !password) {
-        showMessage('Please enter email and password', 'error');
-        return;
-      }
+      if (!email || !password) return showOwnerMessage('Please enter email and password', 'error');
 
       fetch('/api/subscribers?sendTime=' + time, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       })
       .then(r => r.json())
       .then(data => {
         if (data.success) {
-          showMessage('Subscriber added!', 'success');
+          showOwnerMessage('Subscriber added!', 'success');
           document.getElementById('newEmail').value = '';
           document.getElementById('newPassword').value = '';
-          loadDashboard();
-        } else {
-          showMessage(data.error, 'error');
-        }
+          loadOwnerDashboard();
+        } else showOwnerMessage(data.error, 'error');
       });
     }
 
     function deleteSubscriber(email) {
       const token = localStorage.getItem('token');
-      fetch('/api/subscribers/' + email, {
-        method: 'DELETE',
-        headers: { 'Authorization': token }
-      })
+      fetch('/api/subscribers/' + email, { method: 'DELETE', headers: { 'Authorization': token } })
       .then(r => r.json())
-      .then(data => {
-        showMessage('Subscriber removed', 'success');
-        loadDashboard();
-      });
+      .then(() => { showOwnerMessage('Subscriber removed', 'success'); loadOwnerDashboard(); });
     }
 
     function sendTestEmail() {
       const email = localStorage.getItem('email');
       fetch('/api/test-email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email })
       })
       .then(r => r.json())
-      .then(data => showMessage(data.message || data.error, data.success ? 'success' : 'error'));
+      .then(data => showOwnerMessage(data.message || data.error, data.success ? 'success' : 'error'));
     }
 
     function sendNow() {
       fetch('/api/send-digest', { method: 'POST' })
       .then(r => r.json())
-      .then(data => showMessage(data.message, data.success ? 'success' : 'error'));
+      .then(data => {
+        showOwnerMessage(data.message || data.error, data.success ? 'success' : 'error');
+        if (data.success) document.getElementById('email-count').innerText = data.message.match(/\\d+/) || '0';
+      });
+    }
+
+    function showOwnerMessage(msg, type) {
+      const el = document.getElementById('ownerMessage');
+      el.innerText = msg; el.className = 'message ' + type;
+    }
+
+    /* ===== SUBSCRIBER FUNCTIONS ===== */
+    function loadSubscriberPortal() {
+      const token = localStorage.getItem('token');
+      fetch('/api/my-profile', { headers: { 'Authorization': token } })
+      .then(r => r.json())
+      .then(profile => {
+        document.getElementById('myTimeDisplay').innerText = profile.send_time || '--:--';
+        document.getElementById('myTimeInput').value = profile.send_time || '07:00';
+      });
+      loadNews();
+    }
+
+    function updateMyTime() {
+      const token = localStorage.getItem('token');
+      const sendTime = document.getElementById('myTimeInput').value;
+      fetch('/api/my-time', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': token },
+        body: JSON.stringify({ sendTime })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          document.getElementById('myTimeDisplay').innerText = sendTime;
+          showSubMessage('Delivery time updated!', 'success');
+        } else showSubMessage(data.error, 'error');
+      });
+    }
+
+    function loadNews() {
+      fetch('/api/news')
+      .then(r => r.json())
+      .then(data => {
+        allNewsItems = data || [];
+        renderNews('all');
+      });
+    }
+
+    function renderNews(category) {
+      const feed = document.getElementById('newsFeed');
+      const items = category === 'all' ? allNewsItems : allNewsItems.filter(n => (n.category || '').includes(category));
+
+      if (!items.length) {
+        feed.innerHTML = '<div class="empty-state">No news yet. Check back after the next digest is sent.</div>';
+        return;
+      }
+
+      feed.innerHTML = items.map(item => \`
+        <div class="news-item">
+          <div class="news-meta">\${new Date(item.created_at).toLocaleDateString()} • \${item.category || 'General'}</div>
+          <div class="news-title">\${item.title || ''}</div>
+          <div class="news-content">\${(item.content || '').substring(0, 200)}</div>
+        </div>
+      \`).join('');
+    }
+
+    function filterNews(cat) {
+      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+      document.querySelector(\`[data-cat="\${cat}"]\`).classList.add('active');
+      renderNews(cat);
+    }
+
+    function showSubMessage(msg, type) {
+      const el = document.getElementById('subMessage');
+      el.innerText = msg; el.className = 'message ' + type;
     }
 
     function showMessage(msg, type) {
       const el = document.getElementById('message');
-      el.innerText = msg;
-      el.className = 'message ' + type;
+      el.innerText = msg; el.className = 'message ' + type;
     }
 
-    // Check if already logged in
-    if (localStorage.getItem('token')) {
-      document.getElementById('loginBox').classList.add('hidden');
-      document.getElementById('dashboardBox').classList.remove('hidden');
-      loadDashboard();
-    }
+    // Resume session
+    if (localStorage.getItem('token')) enterPortal();
   </script>
 </body>
 </html>
@@ -824,9 +1011,6 @@ app.listen(PORT, () => {
 ║   ✅ Agent Running 24/7                              ║
 ╚═══════════════════════════════════════════════════════╝
   `);
-  
-  // Schedule digests
-  setTimeout(() => {
-    scheduleAllDigests();
-  }, 2000);
+
+  setTimeout(() => { scheduleAllDigests(); }, 2000);
 });

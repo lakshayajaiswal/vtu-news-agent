@@ -105,67 +105,106 @@ if (RESEND_API_KEY) {
 }
 
 // News Sources
-const newsSources = {
-  vtu: {
-    name: 'VTU Updates',
-    emoji: '🎓',
-    sources: [
-      { url: 'https://vtu.ac.in/news', keyword: 'VTU' },
-      { url: 'https://vtu.ac.in', keyword: 'announcements' }
-    ]
-  },
-  ai: {
-    name: 'AI & Generative AI',
-    emoji: '🤖',
-    sources: [
-      { url: 'https://news.ycombinator.com/newest', keyword: 'AI' },
-      { url: 'https://www.producthunt.com/', keyword: 'AI tools' }
-    ]
-  },
-  dev: {
-    name: 'Software Development',
-    emoji: '💻',
-    sources: [
-      { url: 'https://github.com/trending', keyword: 'development' },
-      { url: 'https://dev.to', keyword: 'programming' }
-    ]
-  },
-  security: {
-    name: 'Cybersecurity',
-    emoji: '🔒',
-    sources: [
-      { url: 'https://krebsonsecurity.com/', keyword: 'security' },
-      { url: 'https://thehackernews.com/', keyword: 'cyber' }
-    ]
-  }
-};
-
-// Fetch news
+// Fetch news from real, structured APIs (not raw HTML scraping)
 async function fetchAllNews() {
   const allNews = [];
-  
-  for (const [catKey, catData] of Object.entries(newsSources)) {
-    for (const source of catData.sources) {
-      try {
-        const response = await axios.get(source.url, {
-          timeout: 5000,
-          headers: { 'User-Agent': 'Mozilla/5.0 News Aggregator' }
-        });
-        
-        allNews.push({
-          category: catData.name,
-          emoji: catData.emoji,
-          title: `${catData.name}: ${source.keyword}`,
-          content: response.data.substring(0, 300),
-          source: source.url,
-          timestamp: new Date()
-        });
-      } catch (err) {
-        console.log(`⚠️ Could not fetch from ${source.url}`);
+
+  // --- AI & Dev & Security news via Hacker News API (free, no key needed) ---
+  try {
+    const topIds = await axios.get('https://hacker-news.firebaseio.com/v0/topstories.json', { timeout: 8000 });
+    const ids = topIds.data.slice(0, 25); // check top 25 stories
+
+    const stories = await Promise.all(
+      ids.map(id =>
+        axios.get(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { timeout: 8000 })
+          .then(r => r.data)
+          .catch(() => null)
+      )
+    );
+
+    const keywordMap = [
+      { cat: 'AI & Generative AI', emoji: '🤖', keywords: ['ai', 'llm', 'gpt', 'claude', 'openai', 'anthropic', 'machine learning', 'neural'] },
+      { cat: 'Cybersecurity', emoji: '🔒', keywords: ['security', 'vulnerability', 'breach', 'exploit', 'cve', 'hack', 'malware', 'ransomware'] },
+      { cat: 'Software Development', emoji: '💻', keywords: ['react', 'javascript', 'python', 'rust', 'programming', 'framework', 'github', 'code', 'developer', 'api'] }
+    ];
+
+    for (const story of stories) {
+      if (!story || !story.title) continue;
+      const titleLower = story.title.toLowerCase();
+
+      for (const group of keywordMap) {
+        if (group.keywords.some(kw => titleLower.includes(kw))) {
+          allNews.push({
+            category: group.cat,
+            emoji: group.emoji,
+            title: story.title,
+            content: story.url ? `Read more: ${story.url}` : `${story.score || 0} points on Hacker News`,
+            source: 'Hacker News',
+            timestamp: new Date(story.time * 1000)
+          });
+          break; // only file each story under one category
+        }
       }
     }
+  } catch (err) {
+    console.log('⚠️ Hacker News fetch failed:', err.message);
   }
-  
+
+  // --- Software Development: GitHub Trending via public search API (free, no key) ---
+  try {
+    const since = new Date();
+    since.setDate(since.getDate() - 3);
+    const dateStr = since.toISOString().split('T')[0];
+
+    const ghResponse = await axios.get('https://api.github.com/search/repositories', {
+      params: { q: `created:>${dateStr}`, sort: 'stars', order: 'desc', per_page: 5 },
+      headers: { 'User-Agent': 'VTU-News-Agent', Accept: 'application/vnd.github+json' },
+      timeout: 8000
+    });
+
+    for (const repo of ghResponse.data.items || []) {
+      allNews.push({
+        category: 'Software Development',
+        emoji: '💻',
+        title: `🔥 Trending: ${repo.full_name}`,
+        content: repo.description || 'No description available',
+        source: repo.html_url,
+        timestamp: new Date(repo.created_at)
+      });
+    }
+  } catch (err) {
+    console.log('⚠️ GitHub fetch failed:', err.message);
+  }
+
+  // --- VTU / General news via NewsAPI (needs free key from newsapi.org) ---
+  if (process.env.NEWSAPI_KEY) {
+    try {
+      const newsResponse = await axios.get('https://newsapi.org/v2/everything', {
+        params: {
+          q: 'VTU OR "Visvesvaraya Technological University" OR "Karnataka engineering exam"',
+          sortBy: 'publishedAt',
+          language: 'en',
+          pageSize: 5,
+          apiKey: process.env.NEWSAPI_KEY
+        },
+        timeout: 8000
+      });
+
+      for (const article of newsResponse.data.articles || []) {
+        allNews.push({
+          category: 'VTU Updates',
+          emoji: '🎓',
+          title: article.title,
+          content: article.description || 'No description available',
+          source: article.url,
+          timestamp: new Date(article.publishedAt)
+        });
+      }
+    } catch (err) {
+      console.log('⚠️ NewsAPI fetch failed:', err.message);
+    }
+  }
+
   return allNews.length > 0 ? allNews : generateSampleNews();
 }
 
@@ -174,37 +213,22 @@ function generateSampleNews() {
     {
       category: 'VTU Updates',
       emoji: '🎓',
-      title: '📚 VTU CSE 2025 Exam Schedule',
-      content: 'Exam dates announced for May 1-15, 2025. Registration opens February 1st.',
-      source: 'VTU Official',
+      title: 'No VTU-specific news found today',
+      content: 'Add a NEWSAPI_KEY environment variable (free from newsapi.org) to get real VTU/Karnataka education news.',
+      source: 'System',
       timestamp: new Date()
     },
     {
       category: 'AI & Generative AI',
       emoji: '🤖',
-      title: '🤖 Claude Opus 4.6 Released',
-      content: 'New Claude model with improved coding capabilities and faster inference.',
-      source: 'Anthropic',
-      timestamp: new Date()
-    },
-    {
-      category: 'Software Development',
-      emoji: '💻',
-      title: '💻 React 19.2 Released',
-      content: 'React 19.2 now available with Server Components and improved performance.',
-      source: 'React',
-      timestamp: new Date()
-    },
-    {
-      category: 'Cybersecurity',
-      emoji: '🔒',
-      title: '⚠️ Critical Security Alert',
-      content: 'Important: Update your systems if you run Linux servers. Patch available.',
-      source: 'Krebson Security',
+      title: 'No matching AI news found today',
+      content: 'Today\'s top Hacker News stories did not include AI-related keywords. This is normal on quiet news days.',
+      source: 'System',
       timestamp: new Date()
     }
   ];
 }
+
 
 // Summarize with Claude
 async function summarizeNews(newsItems) {
@@ -216,7 +240,7 @@ async function summarizeNews(newsItems) {
       .join('\n\n');
 
     const message = await client.messages.create({
-      model: 'claude-opus-4-6',
+      model: 'claude-sonnet-5',
       max_tokens: 1000,
       messages: [{
         role: 'user',
@@ -230,7 +254,7 @@ ${newsContent}`
       ? message.content[0].text 
       : 'Unable to summarize news.';
   } catch (err) {
-    console.error('Claude API Error:', err.message);
+    console.error('Claude API Error:', err.status, err.message, err.error || '');
     return 'News digest temporarily unavailable.';
   }
 }
@@ -300,7 +324,7 @@ async function sendDigestToSubscriber(email, sendTime) {
     </div>
 
     <div class="cta">
-      <a href="http://localhost:3000">📖 View Full News on Website</a>
+      <a href="${process.env.APP_URL || 'http://localhost:3000'}">📖 View Full News on Website</a>
     </div>
 
     <div class="footer">

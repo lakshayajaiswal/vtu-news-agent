@@ -377,6 +377,39 @@ app.post('/api/login', (req, res) => {
   );
 });
 
+// API: Public Signup (anyone can create their own subscriber account)
+app.post('/api/signup', (req, res) => {
+  const { email, password, sendTime } = req.body;
+
+  if (!email || !password) {
+    return res.json({ success: false, error: 'Email and password required' });
+  }
+  if (password.length < 6) {
+    return res.json({ success: false, error: 'Password must be at least 6 characters' });
+  }
+
+  const finalSendTime = sendTime || process.env.DEFAULT_SEND_TIME || '07:00';
+
+  db.get('SELECT * FROM subscribers WHERE email = ?', [email], (err, existing) => {
+    if (existing) {
+      return res.json({ success: false, error: 'This email is already registered. Please login instead.' });
+    }
+
+    db.run(
+      'INSERT INTO subscribers (email, password, send_time) VALUES (?, ?, ?)',
+      [email, password, finalSendTime],
+      (err) => {
+        if (err) {
+          return res.json({ success: false, error: 'Could not create account. Try again.' });
+        }
+        console.log(`✅ New self-signup: ${email}`);
+        scheduleAllDigests(); // re-schedule to include the new subscriber
+        res.json({ success: true, message: 'Account created! You can now login.' });
+      }
+    );
+  });
+});
+
 // API: Add subscriber
 app.post('/api/subscribers', (req, res) => {
   const { email, password } = req.body;
@@ -449,6 +482,28 @@ app.get('/api/news', (req, res) => {
 });
 
 // API: Send digest now (testing)
+// API: Hourly check endpoint - designed for external cron services (cron-job.org etc)
+// to call this every hour. Only sends to subscribers whose send_time hour matches current hour.
+app.get('/api/hourly-check', (req, res) => {
+  const now = new Date();
+  const currentHour = String(now.getHours()).padStart(2, '0');
+
+  db.all('SELECT email, send_time FROM subscribers', (err, subscribers) => {
+    if (err || !subscribers) {
+      return res.json({ success: false, error: 'No subscribers' });
+    }
+
+    const dueNow = subscribers.filter(sub => sub.send_time.startsWith(currentHour));
+
+    dueNow.forEach(sub => {
+      sendDigestToSubscriber(sub.email, sub.send_time);
+    });
+
+    console.log(`⏰ Hourly check at ${currentHour}:00 - sent to ${dueNow.length} of ${subscribers.length} subscribers`);
+    res.json({ success: true, hour: currentHour, sentTo: dueNow.length, totalSubscribers: subscribers.length });
+  });
+});
+
 app.post('/api/send-digest', (req, res) => {
   db.all('SELECT email, send_time FROM subscribers', (err, subscribers) => {
     if (err || !subscribers) {
@@ -529,11 +584,19 @@ app.get('/', (req, res) => {
   
   <div class="container">
     <div id="loginBox" class="login-box">
-      <h2>Login</h2>
+      <h2 id="formTitle">Login</h2>
       <input type="email" id="email" class="input" placeholder="Email" />
       <input type="password" id="password" class="input" placeholder="Password" />
-      <button class="button" onclick="login()">Login</button>
+      <div id="signupExtra" class="hidden">
+        <label style="font-size:12px;color:#666;display:block;margin-top:10px;">Preferred daily news time</label>
+        <input type="time" id="signupTime" class="input" value="07:00" />
+      </div>
+      <button class="button" id="primaryBtn" onclick="login()">Login</button>
       <div class="message" id="message"></div>
+      <p style="text-align:center;font-size:13px;margin-top:15px;">
+        <span id="toggleText">Don't have an account?</span>
+        <a href="#" onclick="toggleMode(); return false;" id="toggleLink" style="color:#0066cc;font-weight:bold;">Sign up</a>
+      </p>
     </div>
 
     <div id="dashboardBox" class="hidden dashboard">
@@ -578,6 +641,46 @@ app.get('/', (req, res) => {
   </div>
 
   <script>
+    let isSignupMode = false;
+
+    function toggleMode() {
+      isSignupMode = !isSignupMode;
+      document.getElementById('formTitle').innerText = isSignupMode ? 'Sign Up' : 'Login';
+      document.getElementById('primaryBtn').innerText = isSignupMode ? 'Create Account' : 'Login';
+      document.getElementById('primaryBtn').onclick = isSignupMode ? signup : login;
+      document.getElementById('signupExtra').classList.toggle('hidden', !isSignupMode);
+      document.getElementById('toggleText').innerText = isSignupMode ? 'Already have an account?' : "Don't have an account?";
+      document.getElementById('toggleLink').innerText = isSignupMode ? 'Login' : 'Sign up';
+      document.getElementById('message').innerText = '';
+    }
+
+    function signup() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const sendTime = document.getElementById('signupTime').value;
+
+      if (!email || !password) {
+        showMessage('Please enter email and password', 'error');
+        return;
+      }
+
+      fetch('/api/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, sendTime })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          showMessage('Account created! Logging you in...', 'success');
+          setTimeout(() => { toggleMode(); login(); }, 1000);
+        } else {
+          showMessage(data.error, 'error');
+        }
+      })
+      .catch(err => showMessage('Error: ' + err.message, 'error'));
+    }
+
     function login() {
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;

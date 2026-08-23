@@ -1,7 +1,7 @@
 {
   "name": "vtu-news-agent",
   "version": "1.0.0",
-  "description": "Automated VTU news aggregator with AI summarization",
+  "description": "Automated VTU news aggregator - free, no paid APIs required",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -12,7 +12,6 @@
     "node-cron": "^3.0.2",
     "axios": "^1.6.2",
     "dotenv": "^16.3.1",
-    "@anthropic-ai/sdk": "^0.20.0",
     "sqlite3": "^5.1.6",
     "cors": "^2.8.5"
   },

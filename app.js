@@ -230,6 +230,31 @@ ${newsContent}`
   }
 }
 
+// Format summary text lines into HTML (kept separate to avoid nested template literal issues)
+function formatSummaryLines(summary) {
+  const lines = summary.split('\n');
+  let html = '';
+
+  for (const line of lines) {
+    if (line.includes('⚠️')) {
+      html += '<div class="alert"><p>' + escapeHtml(line) + '</p></div>';
+    } else if (line.startsWith('#')) {
+      html += '<h2>' + escapeHtml(line.replace(/^#+\s*/, '')) + '</h2>';
+    } else if (line.trim()) {
+      html += '<p>' + escapeHtml(line) + '</p>';
+    }
+  }
+
+  return html;
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // Send digest
 async function sendDigestToSubscriber(email, sendTime) {
   try {
@@ -266,12 +291,7 @@ async function sendDigestToSubscriber(email, sendTime) {
     </div>
     
     <div class="content">
-      ${summary.split('\\n').map((line) => {
-        if (line.includes('⚠️')) return \`<div class="alert"><p>\${line}</p></div>\`;
-        if (line.startsWith('#')) return \`<h2>\${line.replace(/^#+\\s*/, '')}</h2>\`;
-        if (line.trim()) return \`<p>\${line}</p>\`;
-        return '';
-      }).join('')}
+      ${formatSummaryLines(summary)}
     </div>
 
     <div class="cta">

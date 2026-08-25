@@ -1,6 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const cron = require('node-cron');
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
@@ -78,130 +77,97 @@ db.serialize(() => {
   }
 });
 
-// Email Configuration - using Resend (HTTP API) instead of SMTP
-// Render's free tier blocks outbound SMTP ports, so Gmail SMTP cannot work there.
-// Resend sends over HTTPS, which is never blocked.
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_FROM = process.env.RESEND_FROM || 'VTU News Agent <onboarding@resend.dev>';
+// Email Configuration - using Brevo (HTTP API) instead of SMTP or Resend sandbox.
+// Render's free tier blocks outbound SMTP, and Resend's free sender only delivers to your
+// own account email. Brevo's single-sender verification lets you send to ANY subscriber, free.
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL; // must be verified in Brevo dashboard
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || 'VTU News Agent';
 
 async function sendEmail(to, subject, html) {
-  if (!RESEND_API_KEY) {
-    throw new Error('RESEND_API_KEY is not set in environment variables');
+  if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
+    throw new Error('BREVO_API_KEY or BREVO_SENDER_EMAIL is not set in environment variables');
   }
   const response = await axios.post(
-    'https://api.resend.com/emails',
-    { from: RESEND_FROM, to: [to], subject, html },
-    { headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+    'https://api.brevo.com/v3/smtp/email',
+    {
+      sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html
+    },
+    { headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' } }
   );
   return response.data;
 }
 
-if (RESEND_API_KEY) {
-  console.log('✅ Email service ready (Resend)');
+if (BREVO_API_KEY && BREVO_SENDER_EMAIL) {
+  console.log('✅ Email service ready (Brevo)');
 } else {
-  console.log('❌ RESEND_API_KEY not set - emails will fail');
+  console.log('❌ BREVO_API_KEY or BREVO_SENDER_EMAIL not set - emails will fail');
 }
 
-// News Sources
-// Fetch news from real, structured APIs (not raw HTML scraping)
+// News Sources - Google News RSS (free, no API key, no rate limit issues)
+// covers VTU-specific news plus AI/security/dev, since no free structured VTU-only API exists.
+function parseGoogleNewsRSS(xml) {
+  const items = [];
+  const itemBlocks = xml.split('<item>').slice(1);
+
+  for (const block of itemBlocks.slice(0, 6)) {
+    const titleMatch = block.match(/<title>([\s\S]*?)<\/title>/);
+    const linkMatch = block.match(/<link>([\s\S]*?)<\/link>/);
+    const pubDateMatch = block.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+    const sourceMatch = block.match(/<source[^>]*>([\s\S]*?)<\/source>/);
+
+    if (!titleMatch) continue;
+
+    let title = titleMatch[1].replace('<![CDATA[', '').replace(']]>', '').trim();
+    const link = linkMatch ? linkMatch[1].replace('<![CDATA[', '').replace(']]>', '').trim() : '';
+    const pubDate = pubDateMatch ? new Date(pubDateMatch[1]) : new Date();
+    const sourceName = sourceMatch ? sourceMatch[1].replace('<![CDATA[', '').replace(']]>', '').trim() : '';
+
+    items.push({ title, link, pubDate, sourceName });
+  }
+  return items;
+}
+
+async function fetchCategoryFromGoogleNews(query, category, emoji) {
+  const results = [];
+  try {
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-IN&gl=IN&ceid=IN:en`;
+    const response = await axios.get(url, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const items = parseGoogleNewsRSS(response.data);
+
+    for (const item of items) {
+      results.push({
+        category,
+        emoji,
+        title: item.title,
+        content: item.sourceName ? `via ${item.sourceName}` : 'Tap to read more',
+        source: item.link,
+        timestamp: item.pubDate
+      });
+    }
+  } catch (err) {
+    console.log(`⚠️ Google News fetch failed for "${query}":`, err.message);
+  }
+  return results;
+}
+
 async function fetchAllNews() {
   const allNews = [];
 
-  // --- AI & Dev & Security news via Hacker News API (free, no key needed) ---
-  try {
-    const topIds = await axios.get('https://hacker-news.firebaseio.com/v0/topstories.json', { timeout: 8000 });
-    const ids = topIds.data.slice(0, 25); // check top 25 stories
+  const categoryQueries = [
+    { query: 'VTU 2025 scheme OR "Visvesvaraya Technological University"', category: 'VTU Updates', emoji: '🎓' },
+    { query: 'artificial intelligence OR generative AI OR LLM', category: 'AI & Generative AI', emoji: '🤖' },
+    { query: 'cybersecurity OR data breach OR vulnerability', category: 'Cybersecurity', emoji: '🔒' },
+    { query: 'software development OR programming OR github', category: 'Software Development', emoji: '💻' }
+  ];
 
-    const stories = await Promise.all(
-      ids.map(id =>
-        axios.get(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { timeout: 8000 })
-          .then(r => r.data)
-          .catch(() => null)
-      )
-    );
-
-    const keywordMap = [
-      { cat: 'AI & Generative AI', emoji: '🤖', keywords: ['ai', 'llm', 'gpt', 'claude', 'openai', 'anthropic', 'machine learning', 'neural'] },
-      { cat: 'Cybersecurity', emoji: '🔒', keywords: ['security', 'vulnerability', 'breach', 'exploit', 'cve', 'hack', 'malware', 'ransomware'] },
-      { cat: 'Software Development', emoji: '💻', keywords: ['react', 'javascript', 'python', 'rust', 'programming', 'framework', 'github', 'code', 'developer', 'api'] }
-    ];
-
-    for (const story of stories) {
-      if (!story || !story.title) continue;
-      const titleLower = story.title.toLowerCase();
-
-      for (const group of keywordMap) {
-        if (group.keywords.some(kw => titleLower.includes(kw))) {
-          allNews.push({
-            category: group.cat,
-            emoji: group.emoji,
-            title: story.title,
-            content: story.url ? `Read more: ${story.url}` : `${story.score || 0} points on Hacker News`,
-            source: 'Hacker News',
-            timestamp: new Date(story.time * 1000)
-          });
-          break; // only file each story under one category
-        }
-      }
-    }
-  } catch (err) {
-    console.log('⚠️ Hacker News fetch failed:', err.message);
-  }
-
-  // --- Software Development: GitHub Trending via public search API (free, no key) ---
-  try {
-    const since = new Date();
-    since.setDate(since.getDate() - 3);
-    const dateStr = since.toISOString().split('T')[0];
-
-    const ghResponse = await axios.get('https://api.github.com/search/repositories', {
-      params: { q: `created:>${dateStr}`, sort: 'stars', order: 'desc', per_page: 5 },
-      headers: { 'User-Agent': 'VTU-News-Agent', Accept: 'application/vnd.github+json' },
-      timeout: 8000
-    });
-
-    for (const repo of ghResponse.data.items || []) {
-      allNews.push({
-        category: 'Software Development',
-        emoji: '💻',
-        title: `🔥 Trending: ${repo.full_name}`,
-        content: repo.description || 'No description available',
-        source: repo.html_url,
-        timestamp: new Date(repo.created_at)
-      });
-    }
-  } catch (err) {
-    console.log('⚠️ GitHub fetch failed:', err.message);
-  }
-
-  // --- VTU / General news via NewsAPI (needs free key from newsapi.org) ---
-  if (process.env.NEWSAPI_KEY) {
-    try {
-      const newsResponse = await axios.get('https://newsapi.org/v2/everything', {
-        params: {
-          q: 'VTU OR "Visvesvaraya Technological University" OR "Karnataka engineering exam"',
-          sortBy: 'publishedAt',
-          language: 'en',
-          pageSize: 5,
-          apiKey: process.env.NEWSAPI_KEY
-        },
-        timeout: 8000
-      });
-
-      for (const article of newsResponse.data.articles || []) {
-        allNews.push({
-          category: 'VTU Updates',
-          emoji: '🎓',
-          title: article.title,
-          content: article.description || 'No description available',
-          source: article.url,
-          timestamp: new Date(article.publishedAt)
-        });
-      }
-    } catch (err) {
-      console.log('⚠️ NewsAPI fetch failed:', err.message);
-    }
-  }
+  const results = await Promise.all(
+    categoryQueries.map(c => fetchCategoryFromGoogleNews(c.query, c.category, c.emoji))
+  );
+  results.forEach(items => allNews.push(...items));
 
   return allNews.length > 0 ? allNews : generateSampleNews();
 }
@@ -209,18 +175,10 @@ async function fetchAllNews() {
 function generateSampleNews() {
   return [
     {
-      category: 'VTU Updates',
-      emoji: '🎓',
-      title: 'No VTU-specific news found today',
-      content: 'Add a NEWSAPI_KEY environment variable (free from newsapi.org) to get real VTU/Karnataka education news.',
-      source: 'System',
-      timestamp: new Date()
-    },
-    {
-      category: 'AI & Generative AI',
-      emoji: '🤖',
-      title: 'No matching AI news found today',
-      content: 'Today\'s top Hacker News stories did not include AI-related keywords. This is normal on quiet news days.',
+      category: 'General',
+      emoji: '📰',
+      title: 'No news found this cycle',
+      content: 'Google News had no fresh results for today\'s queries. This is rare and usually resolves on the next send.',
       source: 'System',
       timestamp: new Date()
     }
@@ -228,10 +186,42 @@ function generateSampleNews() {
 }
 
 
-// Format news into a readable digest - no paid API needed, pure local formatting
-function summarizeNews(newsItems) {
+// Format news into a readable digest.
+// If GROQ_API_KEY is set (free at console.groq.com, no card needed), uses their AI for a nicer
+// written summary. Otherwise falls back to clean local formatting - either way works, no cost ever.
+async function summarizeNews(newsItems) {
   if (newsItems.length === 0) return 'No news available today.';
 
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const newsText = newsItems
+        .map((item, i) => `${i + 1}. [${item.category}] ${item.title} - ${item.content}`)
+        .join('\n');
+
+      const response = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: 'llama-3.1-8b-instant',
+          messages: [{
+            role: 'user',
+            content: `Write a short, engaging daily news digest for an engineering student from these headlines. Organize by category with a "# Category" heading per section. Mark anything urgent/critical with ⚠️. Keep it concise.\n\n${newsText}`
+          }],
+          max_tokens: 800
+        },
+        { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+
+      const text = response.data.choices?.[0]?.message?.content;
+      if (text) return text;
+    } catch (err) {
+      console.log('⚠️ Groq AI summarization failed, using local formatting instead:', err.message);
+    }
+  }
+
+  return formatNewsLocally(newsItems);
+}
+
+function formatNewsLocally(newsItems) {
   // Group items by category
   const byCategory = {};
   for (const item of newsItems) {
@@ -280,11 +270,36 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;');
 }
 
+// Cache today's news so we don't refetch/re-summarize for every single subscriber
+let newsCache = { date: null, items: [], summary: '' };
+
+function saveNewsToDatabase(items) {
+  for (const item of items) {
+    db.run(
+      'INSERT INTO news (title, content, category, source) VALUES (?, ?, ?, ?)',
+      [item.title, item.content, item.category, item.source || '']
+    );
+  }
+}
+
+async function getTodaysNews() {
+  const today = new Date().toDateString();
+  if (newsCache.date === today && newsCache.items.length > 0) {
+    return newsCache; // already fetched today, reuse it
+  }
+
+  const items = await fetchAllNews();
+  const summary = await summarizeNews(items);
+
+  saveNewsToDatabase(items);
+  newsCache = { date: today, items, summary };
+  return newsCache;
+}
+
 // Send digest
 async function sendDigestToSubscriber(email, sendTime) {
   try {
-    const newsItems = await fetchAllNews();
-    const summary = await summarizeNews(newsItems);
+    const { summary } = await getTodaysNews();
 
     const htmlContent = `
 <!DOCTYPE html>
@@ -343,31 +358,10 @@ async function sendDigestToSubscriber(email, sendTime) {
   }
 }
 
-// Schedule digests
-function scheduleAllDigests() {
-  db.all('SELECT email, send_time FROM subscribers', (err, subscribers) => {
-    if (err || !subscribers) {
-      console.log('⚠️ No subscribers yet');
-      return;
-    }
-    
-    console.log(`📅 Scheduling ${subscribers.length} subscribers...`);
-    
-    subscribers.forEach(sub => {
-      try {
-        const [hour, minute] = sub.send_time.split(':');
-        const cronExpr = `${minute} ${hour} * * *`;
-        
-        cron.schedule(cronExpr, () => {
-          console.log(`📧 Sending digest to ${sub.email} at ${sub.send_time}`);
-          sendDigestToSubscriber(sub.email, sub.send_time);
-        });
-      } catch (err) {
-        console.error(`Error scheduling for ${sub.email}:`, err.message);
-      }
-    });
-  });
-}
+// NOTE: We do NOT use internal cron scheduling here. Render's free tier sleeps when idle,
+// so in-process timers can silently fail to fire. Instead, an external service (cron-job.org)
+// pings /api/hourly-check every hour, which wakes the app and sends to whoever is due that hour.
+// This is simpler and far more reliable than in-process scheduling on a free host.
 
 // API: Login
 app.post('/api/login', (req, res) => {
@@ -423,7 +417,6 @@ app.post('/api/signup', (req, res) => {
           return res.json({ success: false, error: 'Could not create account. Try again.' });
         }
         console.log(`✅ New self-signup: ${email}`);
-        scheduleAllDigests(); // re-schedule to include the new subscriber
         res.json({ success: true, message: 'Account created! You can now login.' });
       }
     );
@@ -521,7 +514,6 @@ app.put('/api/my-time', (req, res) => {
 
   db.run('UPDATE subscribers SET send_time = ? WHERE email = ?', [sendTime, email], (err) => {
     if (err) return res.json({ success: false, error: 'Update failed' });
-    scheduleAllDigests();
     res.json({ success: true, message: 'Time updated' });
   });
 });
@@ -1026,5 +1018,5 @@ app.listen(PORT, () => {
 ╚═══════════════════════════════════════════════════════╝
   `);
 
-  setTimeout(() => { scheduleAllDigests(); }, 2000);
+
 });
